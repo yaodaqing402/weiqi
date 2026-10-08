@@ -85,6 +85,24 @@ def bundle_root() -> Optional[Path]:
     return base if base.is_dir() else None
 
 
+def _has_opencl() -> bool:
+    sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.isfile(os.path.join(sysroot, "System32", "OpenCL.dll"))
+
+
+def _quiet_windows_errors() -> None:
+    """让子进程继承“不弹系统错误框”的错误模式（缺 DLL、驱动异常时静默失败，交给我们兜底）。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        sem_failcriticalerrors, sem_nogpfaulterrorbox, sem_noopenfileerrorbox = 0x0001, 0x0002, 0x8000
+        ctypes.windll.kernel32.SetErrorMode(
+            sem_failcriticalerrors | sem_nogpfaulterrorbox | sem_noopenfileerrorbox)
+    except (AttributeError, OSError):
+        pass
+
+
 def bundled_executables() -> List[str]:
     root = bundle_root()
     if root is None:
@@ -92,7 +110,9 @@ def bundled_executables() -> List[str]:
     if sys.platform == "darwin":
         cands = [root / "macos" / "katago"]
     elif os.name == "nt":
-        cands = [root / "windows" / b / "katago.exe" for b in ("opencl", "eigenavx2")]
+        # OpenCL.dll 由显卡驱动提供；没有时直接用 CPU 版，免得弹“找不到 DLL”的系统错误框
+        backends = ("opencl", "eigenavx2") if _has_opencl() else ("eigenavx2",)
+        cands = [root / "windows" / b / "katago.exe" for b in backends]
     else:
         cands = []
     return [str(p) for p in cands if p.is_file()]
@@ -326,6 +346,7 @@ class KataGo:
         kw = {}
         if os.name == "nt":
             kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            _quiet_windows_errors()
         self._errf = open(self.log_path, "w", encoding="utf-8", errors="replace")
         try:
             self.proc = subprocess.Popen(
