@@ -1,0 +1,140 @@
+name: Build (Windows & macOS)
+
+# 推送 v* 标签时自动构建 Windows 与 macOS 应用并发布到 Release；也可在网页手动触发。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            label: windows
+          - os: macos-latest
+            label: macos
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: 运行测试（规则 / 读子 / AI / 界面流程）
+        shell: bash
+        env:
+          SDL_VIDEODRIVER: "dummy"
+          SDL_AUDIODRIVER: "dummy"
+        run: python -m pytest tests -q
+
+      - name: 读取版本号
+        id: ver
+        shell: bash
+        run: echo "v=$(grep -oE '__version__[[:space:]]*=[[:space:]]*\"[^\"]+\"' src/weiqi/__init__.py | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')" >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 KataGo 模型与安装包
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/katago/models
+            vendor/katago/cache
+          key: katago-${{ matrix.label }}-${{ hashFiles('packaging/fetch_katago.py') }}
+
+      - name: 安装 KataGo (macOS, Homebrew Metal 版)
+        if: matrix.label == 'macos'
+        run: brew install katago
+
+      - name: 准备随包附带的 KataGo
+        shell: bash
+        run: python packaging/fetch_katago.py
+
+      - name: PyInstaller 打包
+        shell: bash
+        run: pyinstaller packaging/weiqi.spec --clean -y
+
+      - name: 冻结烟测 (macOS) —— 能启动、各界面可构建
+        if: matrix.label == 'macos'
+        shell: bash
+        env:
+          WEIQI_SELFTEST: "1"
+          WEIQI_SELFTEST_OUT: "selftest.txt"
+          SDL_VIDEODRIVER: "dummy"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          "dist/WeiQi_v${{ steps.ver.outputs.v }}.app/Contents/MacOS/WeiQi_v${{ steps.ver.outputs.v }}" || true
+          cat selftest.txt
+          grep -q "SELFTEST PASS" selftest.txt
+          grep -q "katago=.*Frameworks/katago" selftest.txt
+          grep -q "human=.*humanv0" selftest.txt
+
+      - name: 冻结烟测 (Windows) —— 能启动、各界面可构建
+        if: matrix.label == 'windows'
+        shell: pwsh
+        env:
+          WEIQI_SELFTEST: "1"
+          WEIQI_SELFTEST_ENGINE: "1"
+          WEIQI_SELFTEST_OUT: "selftest.txt"
+          SDL_VIDEODRIVER: "dummy"
+          SDL_AUDIODRIVER: "dummy"
+        run: |
+          Start-Process -FilePath "dist/WeiQi_v${{ steps.ver.outputs.v }}/WeiQi_v${{ steps.ver.outputs.v }}.exe" `
+            -WorkingDirectory $PWD -Wait
+          if (-not (Test-Path selftest.txt)) { Write-Error "selftest.txt 未生成"; exit 1 }
+          Get-Content selftest.txt
+          if (-not (Select-String -Path selftest.txt -Pattern "SELFTEST PASS")) { exit 1 }
+          if (-not (Select-String -Path selftest.txt -Pattern "engine=.*humanv0 human=True")) { Write-Error "自带 KataGo 未能启动"; exit 1 }
+
+      - name: 打包产物 (macOS .app → zip)
+        if: matrix.label == 'macos'
+        shell: bash
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "WeiQi_v${{ steps.ver.outputs.v }}.app" \
+            "../WeiQi_v${{ steps.ver.outputs.v }}-macos.zip"
+
+      - name: 打包产物 (Windows 文件夹 → zip)
+        if: matrix.label == 'windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/WeiQi_v${{ steps.ver.outputs.v }}" `
+            -DestinationPath "WeiQi_v${{ steps.ver.outputs.v }}-windows.zip"
+
+      - name: 上传构建产物为 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeiQi-${{ matrix.label }}
+          path: "WeiQi_v${{ steps.ver.outputs.v }}-${{ matrix.label }}.zip"
+          if-no-files-found: error
+
+  # 单独的发布任务：等两个平台都构建完，集中下载产物一次性发布，避免多任务并发创建 Release 冲突。
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          fail_on_unmatched_files: true

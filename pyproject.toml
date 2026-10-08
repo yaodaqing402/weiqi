@@ -1,0 +1,23 @@
+[project]
+name = "weiqi"
+version = "1.0.0"
+description = "围棋 · 少儿版 —— 适合小朋友的围棋游戏（吃子棋 / 正式对局 / 人机 / 双人 / 局域网 / 吃子练习）"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pygame>=2.5,<3",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+weiqi = "weiqi.ui.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
